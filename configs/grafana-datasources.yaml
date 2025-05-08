@@ -7,7 +7,7 @@ datasources:
     url: http://mimir:9009/prometheus
     isDefault: true
     jsonData:
-      httpMethod: POST
+      httpMethod: GET
 
   - name: Tempo
     type: tempo
@@ -24,3 +24,10 @@ datasources:
     url: http://loki:3100
     jsonData:
       maxLines: 1000
+
+  - name: Pyroscope
+    type: grafana-pyroscope-datasource
+    access: proxy
+    url: http://pyroscope:4040
+    jsonData:
+      httpMethod: GET

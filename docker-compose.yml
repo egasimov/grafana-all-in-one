@@ -8,11 +8,23 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
+      - "6060:6060"   # pprof
     depends_on:
       - otel-collector
+      - pyroscope
     environment:
       - PORT=8080
       - OTEL_COLLECTOR_ENDPOINT=otel-collector:4318
+      - PYROSCOPE_APPLICATION_NAME=go-app
+      - PYROSCOPE_SERVER_ADDRESS=http://pyroscope:4040
+      - PYROSCOPE_PROFILING_ENABLED=true
+      - PYROSCOPE_LABELS_ENABLED=true
+      - PYROSCOPE_PROFILING_UPLOAD_RATE=3s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 100M
 
   # OpenTelemetry Collector
   otel-collector:
@@ -30,18 +42,31 @@ services:
 
   # Grafana
   grafana:
-    image: grafana/grafana:10.2.0
+    image: grafana/grafana:latest
     ports:
       - "3000:3000"
-    volumes:
-      - ./configs/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    volumes:
+      - ./configs/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
     depends_on:
       - mimir
-      - tempo
       - loki
+      - tempo
+      - pyroscope
+
+  # Pyroscope for continuous profiling
+  pyroscope:
+    image: grafana/pyroscope:latest
+    ports:
+      - "4040:4040"
+    command:
+      - "server"
+      - "--config.file=/etc/pyroscope/config.yaml"
+    volumes:
+      - ./configs/pyroscope.yaml:/etc/pyroscope/config.yaml
 
   # Mimir (Metrics)
   mimir:

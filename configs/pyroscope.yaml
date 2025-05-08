@@ -1,0 +1,19 @@
+server:
+  http_listen_port: 4040
+
+scrape_configs:
+  - job_name: go-app
+    enabled_profiles: [cpu, heap, goroutine, mutex, block]
+    static_configs:
+      - targets: ['go-app:6060']
+        labels:
+          service: go-app
+    scrape_interval: 3s
+    pprof_config:
+      delta: false
+    profile_mode: ingest
+    scrape_labels_enabled: true
+    label_matchers:
+      - name: trace_id
+        type: regex
+        value: ".*"
