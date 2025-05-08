@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"github.com/pyroscope-io/client/pyroscope"
 	"math/rand"
 	"net/http"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"time"
 
 	_ "net/http/pprof"
@@ -96,21 +98,98 @@ func initLogger() *zap.Logger {
 	return logger
 }
 
+func handleRequest(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	tracer := otel.Tracer("go-sample-app")
+	ctx, span := tracer.Start(ctx, "handleRequest")
+	defer span.End()
+
+	// Add trace ID to pprof labels
+	traceID := span.SpanContext().TraceID().String()
+	labels := pprof.Labels("trace_id", traceID)
+
+	// Set labels for the main goroutine
+	ctx = pprof.WithLabels(ctx, labels)
+	pprof.SetGoroutineLabels(ctx)
+	defer pprof.SetGoroutineLabels(context.Background())
+
+	startTime := time.Now()
+	logger := zap.L()
+
+	// Log request with trace ID
+	logger.Info("handling request",
+		zap.String("path", r.URL.Path),
+		zap.String("method", r.Method),
+		zap.String("remote_addr", r.RemoteAddr),
+		zap.String("trace_id", traceID),
+	)
+
+	// Simulate CPU-intensive work
+	for i := 0; i < 100; i++ {
+		_ = make([]byte, 1024*1024) // Allocate more memory
+		time.Sleep(time.Duration(rand.Intn(10)) * time.Millisecond)
+	}
+
+	// Get trace ID from span context
+	traceID = span.SpanContext().TraceID().String()
+
+	// Create attributes for metrics
+	attrs := []attribute.KeyValue{
+		attribute.String("path", r.URL.Path),
+		attribute.String("method", r.Method),
+		attribute.String("trace_id", traceID),
+	}
+
+	// Record metrics (trace ID will be automatically used as exemplar)
+	meter := otel.Meter("http-server")
+	requestCounter, err := meter.Int64Counter(
+		"http.requests.total",
+		metric.WithDescription("Total number of HTTP requests"),
+	)
+	if err != nil {
+		logger.Fatal("failed to create request counter", zap.Error(err))
+	}
+	requestCounter.Add(ctx, 1, metric.WithAttributes(attrs...))
+
+	duration := float64(time.Since(startTime).Milliseconds())
+	requestDuration, err := meter.Float64Histogram(
+		"http.request.duration",
+		metric.WithDescription("HTTP request duration"),
+		metric.WithUnit("ms"),
+	)
+	if err != nil {
+		logger.Fatal("failed to create request duration histogram", zap.Error(err))
+	}
+	requestDuration.Record(ctx, duration, metric.WithAttributes(attrs...))
+
+	// Log response
+	logger.Info("request completed",
+		zap.String("path", r.URL.Path),
+		zap.String("method", r.Method),
+		zap.Float64("duration_ms", duration),
+		zap.Int("status", http.StatusOK),
+	)
+
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Hello, World!"))
+}
+
 func main() {
 	ctx := context.Background()
 
-	// Enable profiling
-	runtime.SetMutexProfileFraction(5)
-	runtime.SetBlockProfileRate(5)
+	// Enable profiling with higher sampling rates
+	runtime.SetMutexProfileFraction(1)
+	runtime.SetBlockProfileRate(1)
+	runtime.SetCPUProfileRate(100)
 
-	// Start CPU profiling
+	// Start profiling server
 	go func() {
-		profilingServer := http.Server{
-			Addr: ":6060",
-		}
-		if err := profilingServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			panic(err)
-		}
+		// If you're using Pyroscope Go SDK, initialize pyroscope profiler.
+		_, _ = pyroscope.Start(pyroscope.Config{
+			ApplicationName: "my-go-app",
+			ServerAddress:   "http://localhost:4040",
+		})
 	}()
 
 	otelCollector := os.Getenv("OTEL_COLLECTOR_ENDPOINT")
@@ -147,78 +226,11 @@ func main() {
 		}
 	}()
 
-	// Create instruments
-	meter := mp.Meter("http-server")
-	tracer := tp.Tracer("http-server")
+	http.HandleFunc("/hello", handleRequest)
 
-	requestCounter, err := meter.Int64Counter(
-		"http.requests.total",
-		metric.WithDescription("Total number of HTTP requests"),
-	)
-	if err != nil {
-		logger.Fatal("failed to create request counter", zap.Error(err))
-	}
+	logger.Info("Server starting on :8080")
 
-	requestDuration, err := meter.Float64Histogram(
-		"http.request.duration",
-		metric.WithDescription("HTTP request duration"),
-		metric.WithUnit("ms"),
-	)
-	if err != nil {
-		logger.Fatal("failed to create request duration histogram", zap.Error(err))
-	}
-
-	http.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
-		ctx, span := tracer.Start(r.Context(), "handle_request")
-		span.SetAttributes(
-			attribute.String("path", r.URL.Path),
-			attribute.String("method", r.Method),
-		)
-		defer span.End()
-
-		startTime := time.Now()
-
-		// Log request
-		logger.Info("handling request",
-			zap.String("path", r.URL.Path),
-			zap.String("method", r.Method),
-			zap.String("remote_addr", r.RemoteAddr),
-		)
-
-		// Simulate some work
-		time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
-
-		// Get trace ID from span context
-		traceID := span.SpanContext().TraceID().String()
-
-		// Create attributes for metrics
-		attrs := []attribute.KeyValue{
-			attribute.String("path", r.URL.Path),
-			attribute.String("method", r.Method),
-			attribute.String("trace_id", traceID),
-		}
-
-		// Record metrics (trace ID will be automatically used as exemplar)
-		requestCounter.Add(ctx, 1, metric.WithAttributes(attrs...))
-
-		duration := float64(time.Since(startTime).Milliseconds())
-		requestDuration.Record(ctx, duration, metric.WithAttributes(attrs...))
-
-		// Log response
-		logger.Info("request completed",
-			zap.String("path", r.URL.Path),
-			zap.String("method", r.Method),
-			zap.Float64("duration_ms", duration),
-			zap.Int("status", http.StatusOK),
-		)
-
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Hello, World!"))
-	})
-
-	logger.Info("starting server", zap.String("address", ":8080"))
 	if err := http.ListenAndServe(":8080", nil); err != nil {
-		logger.Fatal("server failed", zap.Error(err))
+		logger.Fatal("failed to start server", zap.Error(err))
 	}
 }
