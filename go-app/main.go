@@ -5,7 +5,10 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"runtime"
 	"time"
+
+	_ "net/http/pprof"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -96,6 +99,20 @@ func initLogger() *zap.Logger {
 func main() {
 	ctx := context.Background()
 
+	// Enable profiling
+	runtime.SetMutexProfileFraction(5)
+	runtime.SetBlockProfileRate(5)
+
+	// Start CPU profiling
+	go func() {
+		profilingServer := http.Server{
+			Addr: ":6060",
+		}
+		if err := profilingServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			panic(err)
+		}
+	}()
+
 	otelCollector := os.Getenv("OTEL_COLLECTOR_ENDPOINT")
 	if otelCollector == "" {
 		otelCollector = "localhost:4318"
@@ -151,7 +168,7 @@ func main() {
 		logger.Fatal("failed to create request duration histogram", zap.Error(err))
 	}
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := tracer.Start(r.Context(), "handle_request")
 		span.SetAttributes(
 			attribute.String("path", r.URL.Path),
@@ -171,21 +188,21 @@ func main() {
 		// Simulate some work
 		time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
 
-		// Record metrics
-		requestCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("path", r.URL.Path),
-				attribute.String("method", r.Method),
-			),
-		)
+		// Get trace ID from span context
+		traceID := span.SpanContext().TraceID().String()
+
+		// Create attributes for metrics
+		attrs := []attribute.KeyValue{
+			attribute.String("path", r.URL.Path),
+			attribute.String("method", r.Method),
+			attribute.String("trace_id", traceID),
+		}
+
+		// Record metrics (trace ID will be automatically used as exemplar)
+		requestCounter.Add(ctx, 1, metric.WithAttributes(attrs...))
 
 		duration := float64(time.Since(startTime).Milliseconds())
-		requestDuration.Record(ctx, duration,
-			metric.WithAttributes(
-				attribute.String("path", r.URL.Path),
-				attribute.String("method", r.Method),
-			),
-		)
+		requestDuration.Record(ctx, duration, metric.WithAttributes(attrs...))
 
 		// Log response
 		logger.Info("request completed",
