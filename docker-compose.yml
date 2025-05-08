@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  # Our Go application
+  go-app:
+    build:
+      context: ./go-app
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      - otel-collector
+    environment:
+      - PORT=8080
+      - OTEL_COLLECTOR_ENDPOINT=otel-collector:4318
+
+  # OpenTelemetry Collector
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.92.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./configs/otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - "4318:4318"   # OTLP HTTP receiver
+      - "8889:8889"   # Prometheus exporter
+    depends_on:
+      - mimir
+      - tempo
+      - loki
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:10.2.0
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./configs/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    depends_on:
+      - mimir
+      - tempo
+      - loki
+
+  # Mimir (Metrics)
+  mimir:
+    image: grafana/mimir:2.10.3
+    command: ["-config.file=/etc/mimir.yaml"]
+    volumes:
+      - ./configs/mimir.yaml:/etc/mimir.yaml
+    ports:
+      - "9009:9009"   # HTTP
+      - "9095:9095"   # gRPC
+
+  # Tempo (Traces)
+  tempo:
+    image: grafana/tempo:2.3.1
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./configs/tempo.yaml:/etc/tempo.yaml
+    ports:
+      - "3200:3200"   # HTTP
+      - "4317:4317"   # OTLP gRPC
+
+  # Loki (Logs)
+  loki:
+    image: grafana/loki:2.9.2
+    command: ["-config.file=/etc/loki.yaml"]
+    volumes:
+      - ./configs/loki.yaml:/etc/loki.yaml
+    ports:
+      - "3100:3100"
